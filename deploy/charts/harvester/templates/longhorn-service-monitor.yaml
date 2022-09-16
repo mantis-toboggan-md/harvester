@@ -1,4 +1,5 @@
 {{ if .Values.longhorn.enabled -}}
+{{ if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor" -}}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -15,4 +16,5 @@ spec:
     - {{ .Values.longhorn.namespaceOverride }}
   endpoints:
   - port: manager
+{{- end -}}
 {{- end -}}
