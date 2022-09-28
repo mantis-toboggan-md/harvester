@@ -1,11 +1,11 @@
 package indexeres
 
 import (
+	"context"
 	"fmt"
 
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
+	"github.com/rancher/steve/pkg/server"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	harvesterv1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
@@ -14,49 +14,24 @@ import (
 )
 
 const (
-	UserNameIndex                = "auth.harvesterhci.io/user-username-index"
-	RbByRoleAndSubjectIndex      = "auth.harvesterhci.io/crb-by-role-and-subject"
-	PVCByVMIndex                 = "harvesterhci.io/pvc-by-vm-index"
-	VMByNetworkIndex             = "vm.harvesterhci.io/vm-by-network"
-	PodByNodeNameIndex           = "harvesterhci.io/pod-by-nodename"
-	VMBackupBySourceVMUIDIndex   = "harvesterhci.io/vmbackup-by-source-vm-uid"
-	VMBackupBySourceVMNameIndex  = "harvesterhci.io/vmbackup-by-source-vm-name"
-	VolumeSnapshotByPVCNameIndex = "harvesterhci.io/volume-snapshot-by-pvc-name"
+	PVCByVMIndex                = "harvesterhci.io/pvc-by-vm-index"
+	VMByNetworkIndex            = "vm.harvesterhci.io/vm-by-network"
+	PodByNodeNameIndex          = "harvesterhci.io/pod-by-nodename"
+	VMBackupBySourceVMUIDIndex  = "harvesterhci.io/vmbackup-by-source-vm-uid"
+	VMBackupBySourceVMNameIndex = "harvesterhci.io/vmbackup-by-source-vm-name"
 )
 
-func RegisterScaledIndexers(scaled *config.Scaled) {
-	vmInformer := scaled.Management.VirtFactory.Kubevirt().V1().VirtualMachine().Cache()
-	vmInformer.AddIndexer(VMByNetworkIndex, VMByNetwork)
-}
-
-func RegisterManagementIndexers(management *config.Management) {
-	crbInformer := management.RbacFactory.Rbac().V1().ClusterRoleBinding().Cache()
-	crbInformer.AddIndexer(RbByRoleAndSubjectIndex, rbByRoleAndSubject)
+func Setup(ctx context.Context, server *server.Server, controllers *server.Controllers, options config.Options) error {
+	scaled := config.ScaledWithContext(ctx)
+	management := scaled.Management
 	pvcInformer := management.CoreFactory.Core().V1().PersistentVolumeClaim().Cache()
 	pvcInformer.AddIndexer(PVCByVMIndex, pvcByVM)
 	podInformer := management.CoreFactory.Core().V1().Pod().Cache()
 	podInformer.AddIndexer(PodByNodeNameIndex, PodByNodeName)
-	volumeSnapshotInformer := management.SnapshotFactory.Snapshot().V1beta1().VolumeSnapshot().Cache()
-	volumeSnapshotInformer.AddIndexer(VolumeSnapshotByPVCNameIndex, volumeSnapshotByPVCName)
 	vmBackupInformer := management.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineBackup().Cache()
 	vmBackupInformer.AddIndexer(VMBackupBySourceVMNameIndex, VMBackupBySourceVMName)
-}
-
-func RegisterAPIIndexers(scaled *config.Scaled) {
-	vmBackupInformer := scaled.Management.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineBackup().Cache()
 	vmBackupInformer.AddIndexer(VMBackupBySourceVMUIDIndex, VMBackupBySourceVMUID)
-}
-
-func rbByRoleAndSubject(obj *rbacv1.ClusterRoleBinding) ([]string, error) {
-	keys := make([]string, 0, len(obj.Subjects))
-	for _, s := range obj.Subjects {
-		keys = append(keys, RbRoleSubjectKey(obj.RoleRef.Name, s))
-	}
-	return keys, nil
-}
-
-func RbRoleSubjectKey(roleName string, subject rbacv1.Subject) string {
-	return roleName + "." + subject.Kind + "." + subject.Name
+	return nil
 }
 
 func pvcByVM(obj *corev1.PersistentVolumeClaim) ([]string, error) {
@@ -88,13 +63,6 @@ func VMBackupBySourceVMUID(obj *harvesterv1.VirtualMachineBackup) ([]string, err
 		return []string{}, nil
 	}
 	return []string{string(*obj.Status.SourceUID)}, nil
-}
-
-func volumeSnapshotByPVCName(obj *snapshotv1.VolumeSnapshot) ([]string, error) {
-	if obj.Spec.Source.PersistentVolumeClaimName != nil {
-		return []string{*obj.Spec.Source.PersistentVolumeClaimName}, nil
-	}
-	return []string{}, nil
 }
 
 func VMBackupBySourceVMName(obj *harvesterv1.VirtualMachineBackup) ([]string, error) {
