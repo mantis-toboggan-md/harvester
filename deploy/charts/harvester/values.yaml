@@ -26,29 +26,29 @@ kubevirt-operator:
   containers:
     operator:
       image:
-        repository: registry.suse.com/harvester-beta/virt-operator
-        tag: &kubevirtVersion 0.54.0
+        repository: registry.suse.com/suse/sles/15.4/virt-operator
+        tag: &kubevirtVersion 0.54.0-150400.3.3.2
     ## The following images are placeholder for images in use.
     ## They are not used by the kubevirt-operator chart.
     controller:
       image:
-        repository: registry.suse.com/harvester-beta/virt-controller
+        repository: registry.suse.com/suse/sles/15.4/virt-controller
         tag: *kubevirtVersion
     handler:
       image:
-        repository: registry.suse.com/harvester-beta/virt-handler
+        repository: registry.suse.com/suse/sles/15.4/virt-handler
         tag: *kubevirtVersion
     api:
       image:
-        repository: registry.suse.com/harvester-beta/virt-api
+        repository: registry.suse.com/suse/sles/15.4/virt-api
         tag: *kubevirtVersion
     launcher:
       image:
-        repository: registry.suse.com/harvester-beta/virt-launcher
+        repository: registry.suse.com/suse/sles/15.4/virt-launcher
         tag: *kubevirtVersion
     libguestfs: # introduced from kubevirt v0.44.0
       image:
-        repository: registry.suse.com/harvester-beta/libguestfs-tools
+        repository: registry.suse.com/suse/sles/15.4/libguestfs-tools
         tag: *kubevirtVersion
 
 ## Specify the parameters to override the sub-chart.
@@ -65,7 +65,7 @@ kubevirt:
 
       ## Specify kubevirt feature gates
       developerConfiguration:
-        featureGates: ["LiveMigration", "HotplugVolumes"]
+        featureGates: ["LiveMigration", "HotplugVolumes", "HostDevices"]
 
       ## Specify the network configuration of VirtualMachineInstance.
       ##
@@ -338,16 +338,16 @@ harvester-network-controller:
     repository: rancher/harvester-network-controller
     pullPolicy: IfNotPresent
     # Overrides the image tag whose default is the chart appVersion.
-    tag: v0.3.0-rc1
+    tag: master-head
   helper:
     image:
       repository: rancher/harvester-network-helper
-      tag: v0.3.0-rc1
+      tag: master-head
   webhook:
     image:
       repository: rancher/harvester-network-webhook
       pullPolicy: IfNotPresent
-      tag: v0.3.0-rc1
+      tag: master-head
 
 harvester-node-disk-manager:
   ## Specify to install harvester node disk manager,
@@ -460,20 +460,9 @@ whereabouts:
     repository: ghcr.io/k8snetworkplumbingwg/whereabouts
     tag: "v0.5.4-amd64"
 
-harvester-vm-import-controller:
-  image:
-    imagePullPolicy: IfNotPresent
-    repository: rancher/harvester-vm-import-controller
-    tag: v0.1.0
-
-harvester-pcidevices-controller:
-  image:
-    imagePullPolicy: IfNotPresent
-    repository: rancher/harvester-pcidevices
-    tag: v0.2.1-rc1
-
 harvester-node-manager:
   image:
     imagePullPolicy: IfNotPresent
-    repository: ghcr.io/harvester/node-manager
-    tag: v0.1.0
+    repository: rancher/harvester-node-manager
+    tag: v0.1.1
+

@@ -36,12 +36,13 @@ stages:
 )
 
 type HarvesterRelease struct {
-	Harvester       string `yaml:"harvester,omitempty"`
-	HarvesterChart  string `yaml:"harvesterChart,omitempty"`
-	OS              string `yaml:"os,omitempty"`
-	Kubernetes      string `yaml:"kubernetes,omitempty"`
-	Rancher         string `yaml:"rancher,omitempty"`
-	MonitoringChart string `yaml:"monitoringChart,omitempty"`
+	Harvester            string `yaml:"harvester,omitempty"`
+	HarvesterChart       string `yaml:"harvesterChart,omitempty"`
+	OS                   string `yaml:"os,omitempty"`
+	Kubernetes           string `yaml:"kubernetes,omitempty"`
+	Rancher              string `yaml:"rancher,omitempty"`
+	MonitoringChart      string `yaml:"monitoringChart,omitempty"`
+	MinUpgradableVersion string `yaml:"minUpgradableVersion,omitempty"`
 }
 
 type UpgradeRepoInfo struct {
@@ -337,7 +338,8 @@ func (r *UpgradeRepo) deleteVM() error {
 func (r *UpgradeRepo) deleteImage(pvcName string) error {
 	imageID := r.upgrade.Status.ImageID
 	if imageID == "" {
-		return errors.New("Upgrade repo image is not provided")
+		logrus.Error("Upgrade repo image is not provided")
+		return nil
 	}
 
 	image, err := r.GetImage(imageID)
@@ -442,16 +444,4 @@ func (r *UpgradeRepo) getInfo() (*UpgradeRepoInfo, error) {
 		return nil, err
 	}
 	return &info, nil
-}
-
-func (r *UpgradeRepo) getInfoStr() (string, error) {
-	info, err := r.getInfo()
-	if err != nil {
-		return "", err
-	}
-	out, err := info.Marshall()
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
 }

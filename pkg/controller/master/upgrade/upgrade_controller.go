@@ -3,8 +3,10 @@ package upgrade
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 
+	semverv3 "github.com/Masterminds/semver/v3"
 	provisioningv1 "github.com/rancher/rancher/pkg/apis/provisioning.cattle.io/v1"
 	rkev1 "github.com/rancher/rancher/pkg/apis/rke.cattle.io/v1"
 	provisioningctrl "github.com/rancher/rancher/pkg/generated/controllers/provisioning.cattle.io/v1"
@@ -132,7 +134,7 @@ func (h *upgradeHandler) OnChanged(key string, upgrade *harvesterv1.Upgrade) (*h
 
 	// clean upgrade repo VMs and images if a upgrade succeeds or fails.
 	if harvesterv1.UpgradeCompleted.IsTrue(upgrade) || harvesterv1.UpgradeCompleted.IsFalse(upgrade) {
-		return nil, repo.deleteVM()
+		return nil, h.cleanup(upgrade, harvesterv1.UpgradeCompleted.IsTrue(upgrade))
 	}
 
 	if harvesterv1.ImageReady.IsTrue(upgrade) && harvesterv1.RepoProvisioned.GetStatus(upgrade) == "" {
@@ -155,10 +157,38 @@ func (h *upgradeHandler) OnChanged(key string, upgrade *harvesterv1.Upgrade) (*h
 		}
 		toUpdate.Status.SingleNode = singleNode
 
-		repoInfo, err := repo.getInfoStr()
+		repoInfo, err := repo.getInfo()
 		if err != nil {
 			setUpgradeCompletedCondition(toUpdate, StateFailed, corev1.ConditionFalse, err.Error(), "")
 			return h.upgradeClient.Update(toUpdate)
+		}
+		repoInfoStr, err := repoInfo.Marshall()
+		if err != nil {
+			setUpgradeCompletedCondition(toUpdate, StateFailed, corev1.ConditionFalse, err.Error(), "")
+			return h.upgradeClient.Update(toUpdate)
+		}
+
+		logrus.Info("Check minimum upgradable version")
+		minUpgradableVersion := repoInfo.Release.MinUpgradableVersion
+		if minUpgradableVersion == "" {
+			logrus.Debug("No minimum upgradable version specified, continue the upgrading")
+		} else {
+			constraint := fmt.Sprintf(">= %s", minUpgradableVersion)
+
+			c, err := semverv3.NewConstraint(constraint)
+			if err != nil {
+				return nil, err
+			}
+			v, err := semverv3.NewVersion(upgrade.Status.PreviousVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			if a := c.Check(v); !a {
+				message := fmt.Sprintf("The current version %s is less than the minimum upgradable version %s.", upgrade.Status.PreviousVersion, minUpgradableVersion)
+				setUpgradeCompletedCondition(toUpdate, StateFailed, corev1.ConditionFalse, "Current version not supported.", message)
+				return h.upgradeClient.Update(toUpdate)
+			}
 		}
 
 		logrus.Debug("Start preparing nodes for upgrade")
@@ -168,7 +198,7 @@ func (h *upgradeHandler) OnChanged(key string, upgrade *harvesterv1.Upgrade) (*h
 		}
 
 		toUpdate.Labels[upgradeStateLabel] = StatePreparingNodes
-		toUpdate.Status.RepoInfo = repoInfo
+		toUpdate.Status.RepoInfo = repoInfoStr
 		harvesterv1.NodesPrepared.CreateUnknownIfNotExists(toUpdate)
 		return h.upgradeClient.Update(toUpdate)
 	}
@@ -227,38 +257,63 @@ func (h *upgradeHandler) OnRemove(_ string, upgrade *harvesterv1.Upgrade) (*harv
 	}
 
 	logrus.Debugf("Deleting upgrade %s", upgrade.Name)
+	return upgrade, h.cleanup(upgrade, true)
+}
+
+func (h *upgradeHandler) cleanup(upgrade *harvesterv1.Upgrade, cleanJobs bool) error {
+	// delete vm and images
+	repo := NewUpgradeRepo(h.ctx, upgrade, h)
+	if err := repo.deleteVM(); err != nil {
+		return err
+	}
+
+	// remove rkeConfig in fleet-local/local cluster
+	cluster, err := h.clusterCache.Get("fleet-local", "local")
+	if err != nil {
+		return err
+	}
+	clusterToUpdate := cluster.DeepCopy()
+	clusterToUpdate.Spec.RKEConfig = &provisioningv1.RKEConfig{}
+	if !reflect.DeepEqual(clusterToUpdate, cluster) {
+		logrus.Debug("Update cluster fleet-local/local")
+		if _, err := h.clusterClient.Update(clusterToUpdate); err != nil {
+			return err
+		}
+	}
+
 	// SUC plans are in other namespaces, we need to delete them manually.
 	sets := labels.Set{
 		harvesterUpgradeLabel: upgrade.Name,
 	}
 	plans, err := h.planCache.List(sucNamespace, sets.AsSelector())
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// clean jobs and plans
 	for _, plan := range plans {
-		set := labels.Set{
-			upgradePlanLabel: plan.Name,
-		}
-		jobs, err := h.jobCache.List(plan.Namespace, set.AsSelector())
-		if err != nil {
-			return nil, err
-		}
-		for _, job := range jobs {
-			logrus.Debugf("Deleting job %s/%s", job.Namespace, job.Name)
-			if err := h.jobClient.Delete(job.Namespace, job.Name, &metav1.DeleteOptions{}); err != nil {
-				return nil, err
+		if cleanJobs {
+			set := labels.Set{
+				upgradePlanLabel: plan.Name,
+			}
+			jobs, err := h.jobCache.List(plan.Namespace, set.AsSelector())
+			if err != nil {
+				return err
+			}
+			for _, job := range jobs {
+				logrus.Debugf("Deleting job %s/%s", job.Namespace, job.Name)
+				if err := h.jobClient.Delete(job.Namespace, job.Name, &metav1.DeleteOptions{}); err != nil {
+					return err
+				}
 			}
 		}
 
 		logrus.Debugf("Deleting plan %s/%s", plan.Namespace, plan.Name)
 		if err := h.planClient.Delete(plan.Namespace, plan.Name, &metav1.DeleteOptions{}); err != nil {
-			return nil, err
+			return err
 		}
 	}
-
-	return upgrade, nil
+	return nil
 }
 
 func (h *upgradeHandler) isSingleNodeCluster() (string, error) {

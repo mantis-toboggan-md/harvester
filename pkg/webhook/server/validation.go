@@ -14,6 +14,7 @@ import (
 	"github.com/harvester/harvester/pkg/webhook/resources/node"
 	"github.com/harvester/harvester/pkg/webhook/resources/persistentvolumeclaim"
 	"github.com/harvester/harvester/pkg/webhook/resources/setting"
+	"github.com/harvester/harvester/pkg/webhook/resources/storageclass"
 	"github.com/harvester/harvester/pkg/webhook/resources/templateversion"
 	"github.com/harvester/harvester/pkg/webhook/resources/upgrade"
 	"github.com/harvester/harvester/pkg/webhook/resources/virtualmachine"
@@ -36,7 +37,12 @@ func Validation(clients *clients.Clients, options *config.Options) (http.Handler
 			clients.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineImage().Cache(),
 			clients.Core.PersistentVolumeClaim().Cache(),
 			clients.K8s.AuthorizationV1().SelfSubjectAccessReviews()),
-		upgrade.NewValidator(clients.HarvesterFactory.Harvesterhci().V1beta1().Upgrade().Cache()),
+		upgrade.NewValidator(
+			clients.HarvesterFactory.Harvesterhci().V1beta1().Upgrade().Cache(),
+			clients.Core.Node().Cache(),
+			clients.LonghornFactory.Longhorn().V1beta1().Volume().Cache(),
+			clients.ClusterFactory.Cluster().V1alpha4().Cluster().Cache(),
+		),
 		virtualmachinebackup.NewValidator(
 			clients.KubevirtFactory.Kubevirt().V1().VirtualMachine().Cache(),
 			clients.HarvesterFactory.Harvesterhci().V1beta1().Setting().Cache(),
@@ -53,6 +59,7 @@ func Validation(clients *clients.Clients, options *config.Options) (http.Handler
 			clients.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineBackup().Cache(),
 			clients.SnapshotFactory.Snapshot().V1beta1().VolumeSnapshotClass().Cache(),
 			clients.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineRestore().Cache(),
+			clients.KubevirtFactory.Kubevirt().V1().VirtualMachineInstance().Cache(),
 		),
 		templateversion.NewValidator(
 			clients.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineTemplate().Cache(),
@@ -63,6 +70,7 @@ func Validation(clients *clients.Clients, options *config.Options) (http.Handler
 		bundledeployment.NewValidator(
 			clients.FleetFactory.Fleet().V1alpha1().Cluster().Cache(),
 		),
+		storageclass.NewValidator(clients.StorageFactory.Storage().V1().StorageClass().Cache()),
 	}
 
 	router := webhook.NewRouter()

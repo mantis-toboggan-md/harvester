@@ -41,6 +41,14 @@ if [ -n "$HARVESTER_VIP" ]; then
 fi
 }
 
+patch_ignoring_resource()
+{
+	# add ignoring resources when upgrading to match this pr (https://github.com/harvester/harvester-installer/pull/345)
+	yq e '.spec.diff.comparePatches = [{"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "name": "engineimages.longhorn.io", "jsonPointers":["/status/acceptedNames", "/status/conditions", "/status/storedVersions"]}]' $CHART_MANIFEST -i
+	yq e '.spec.diff.comparePatches += [{"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "name": "nodes.longhorn.io", "jsonPointers":["/status/acceptedNames", "/status/conditions", "/status/storedVersions"]}]' $CHART_MANIFEST -i
+	yq e '.spec.diff.comparePatches += [{"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "name": "volumes.longhorn.io", "jsonPointers":["/status/acceptedNames", "/status/conditions", "/status/storedVersions"]}]' $CHART_MANIFEST -i
+}
+
 # get harvester vip from service first, then configmap, skip potential error
 get_harvester_vip()
 {
@@ -68,12 +76,48 @@ get_harvester_vip()
   fi
 }
 
+# the logging audit is enabled when upgrading from v1.0.3 to v1.1.0
+create_logging_audit()
+{
+  RESOURCE_FILE=/usr/local/share/migrations/managed_charts/logging-audit-v1.0.3.yaml
+
+  if [ -e "$RESOURCE_FILE" ]; then
+    echo "add logging audit resource from $RESOURCE_FILE to manifest $CHART_MANIFEST"
+    cat $RESOURCE_FILE > $CHART_MANIFEST
+  else
+    echo "the logging audit resource file $RESOURCE_FILE is not existing, check!"
+  fi
+}
+
+# the event is enabled when upgrading from v1.0.3 to v1.1.0
+create_event()
+{
+  RESOURCE_FILE=/usr/local/share/migrations/managed_charts/event-v1.0.3.yaml
+
+  if [ -e "$RESOURCE_FILE" ]; then
+    echo "add event resource from $RESOURCE_FILE to manifest $CHART_MANIFEST"
+    cat $RESOURCE_FILE > $CHART_MANIFEST
+  else
+    echo "the event resource file $RESOURCE_FILE is not existing, check!"
+  fi
+}
+
+
 case $CHART_NAME in
+  harvester)
+    patch_ignoring_resource
+    ;;
   rancher-monitoring)
     patch_grafana_resources
     patch_alertmanager_enable
     get_harvester_vip
     patch_alertmanager_externalurl
     patch_prometheus_externalurl
+    ;;
+  rancher-logging)
+    create_logging_audit
+    ;;
+  rancher-logging_event-extension)
+    create_event
     ;;
 esac

@@ -27,6 +27,7 @@ func createCRDs(ctx context.Context, restConfig *rest.Config) error {
 			createManagedChartCRD(),
 			createAppCRD(),
 			createPlanCRD(),
+			createHelmChartCRD(),
 		).
 		BatchWait()
 }
@@ -64,4 +65,16 @@ func createPlanCRD() wcrd.CRD {
 	plan.PluralName = "plans"
 	plan.SingularName = "plan"
 	return plan
+}
+
+func createHelmChartCRD() wcrd.CRD {
+	return wcrd.NamespacedType("HelmChart.helm.cattle.io/v1").
+		WithSchemaFromStruct(helmv1.HelmChart{}).
+		WithColumn("Job", ".status.jobName").
+		WithColumn("Chart", ".spec.chart").
+		WithColumn("TargetNamespace", ".spec.targetNamespace").
+		WithColumn("Version", ".spec.version").
+		WithColumn("Repo", ".spec.repo").
+		WithColumn("HelmVersion", ".spec.helmVersion").
+		WithColumn("Bootstrap", ".spec.bootstrap")
 }

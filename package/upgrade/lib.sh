@@ -27,6 +27,8 @@ detect_repo()
   REPO_RANCHER_WEBHOOK_CHART_VERSION=$(yq -e e '.rancherDependencies.rancher-webhook.chart' $release_file)
   REPO_RANCHER_WEBHOOK_APP_VERSION=$(yq -e e '.rancherDependencies.rancher-webhook.app' $release_file)
   REPO_KUBEVIRT_VERSION=$(yq -e e '.kubevirt' $release_file)
+  # Value could be: 1. valid version string; 2. empty string
+  REPO_HARVESTER_MIN_UPGRADABLE_VERSION=$(yq e '.minUpgradableVersion' $release_file)
 
   if [ -z "$REPO_HARVESTER_VERSION" ]; then
     echo "[ERROR] Fail to get Harvester version from upgrade repo."
@@ -97,15 +99,44 @@ detect_repo()
   curl -sfL "$UPGRADE_REPO_BUNDLE_METADATA" -o "$CACHED_BUNDLE_METADATA"
 }
 
+check_version()
+{
+  CURRENT_VERSION=${UPGRADE_PREVIOUS_VERSION#v}
+  MIN_UPGRADABLE_VERSION=${REPO_HARVESTER_MIN_UPGRADABLE_VERSION#v}
+
+  echo "Current version: $CURRENT_VERSION"
+  echo "Minimum upgradable version: $MIN_UPGRADABLE_VERSION"
+
+  if [ -z "$MIN_UPGRADABLE_VERSION" ]; then
+    echo "No restriction."
+  else
+    VERSIONS_TO_COMPARE="${MIN_UPGRADABLE_VERSION}
+${CURRENT_VERSION}"
+
+  # Current Harvester version should be newer or equal to minimum upgradable version
+    if [ "$VERSIONS_TO_COMPARE" = "$(sort -V <<< "$VERSIONS_TO_COMPARE")" ]; then
+      echo "Current version is supported."
+    else
+      echo "Current version is not supported. Abort the upgrade."
+      exit 1
+    fi
+  fi
+}
+
+get_repo_vm_status()
+{
+  kubectl get virtualmachines.kubevirt.io $UPGRADE_REPO_VM_NAME -n $UPGRADE_NAMESPACE -o=jsonpath='{.status.printableStatus}'
+}
+
 wait_repo()
 {
-  local repo_vm_status
-
   # Start upgrade repo VM in case it's shut down due to migration timeout or job failure
-  repo_vm_status=$(kubectl get virtualmachines.kubevirt.io $UPGRADE_REPO_VM_NAME -n $UPGRADE_NAMESPACE -o=jsonpath='{.status.printableStatus}')
-  if [ "$repo_vm_status" != "Running" ]; then
+  until [[ "$(get_repo_vm_status)" == "Running" ]]
+  do
+    echo "Try to bring up the upgrade repo VM..."
     virtctl start $UPGRADE_REPO_VM_NAME -n $UPGRADE_NAMESPACE || true
-  fi
+    sleep 10
+  done
 
   until curl -sfL $UPGRADE_REPO_RELEASE_FILE
   do
@@ -183,4 +214,68 @@ detect_upgrade()
   upgrade_obj=$(kubectl get upgrades.harvesterhci.io $HARVESTER_UPGRADE_NAME -n $UPGRADE_NAMESPACE -o yaml)
 
   UPGRADE_PREVIOUS_VERSION=$(echo "$upgrade_obj" | yq e .status.previousVersion -)
+}
+
+upgrade_addon()
+{
+  local name=$1
+  local namespace=$2
+  local version=$3
+
+  version=$(cat /usr/local/share/addons/${name}.yaml | yq e .spec.version)
+
+  cat > addon-patch.yaml <<EOF
+spec:
+  version: $version
+EOF
+
+  item_count=$(kubectl get addons.harvesterhci $name -n $namespace -o  jsonpath='{..name}' || true)
+  if [ -z "$item_count" ]; then
+    install_addon $name $namespace
+  else
+    kubectl patch addons.harvesterhci $name -n $namespace --patch-file ./addon-patch.yaml --type merge
+  fi
+}
+
+install_addon()
+{
+  local name=$1
+  local namespace=$2
+
+  kubectl apply -f /usr/local/share/addons/${name}.yaml -n $namespace
+}
+
+wait_for_addons_crd()
+{
+  item_count=$(kubectl get customresourcedefinitions addons.harvesterhci.io -o  jsonpath='{.metadata.name}' || true)
+  while [ -z "$item_count" ]
+  do
+    echo "wait for addons.harvesterhci.io crd to be created"
+    sleep 10
+    item_count=$(kubectl get customresourcedefinitions addons.harvesterhci.io -o  jsonpath='{.metadata.name}' || true)
+  done
+}
+
+lower_version_check()
+{
+  local v1=$1
+  local v2=$2
+  first=$(printf "$v1\n$v2\n" | sort -V | head -1)
+  if [ $first = $v1 ]; then
+    echo "upgrade needed"
+    echo 1 && return 0
+  fi
+}
+
+shutdown_all_vms()
+{
+  kubectl get vmi -A -o json |
+    jq -r '.items[] | [.metadata.name, .metadata.namespace] | @tsv' |
+    while IFS=$'\t' read -r name namespace; do
+      if [ -z "$name" ]; then
+        break
+      fi
+      echo "Stop ${namespace}/${name}"
+      virtctl stop $name -n $namespace
+    done
 }
