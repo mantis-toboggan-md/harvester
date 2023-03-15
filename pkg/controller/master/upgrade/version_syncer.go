@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	gversion "github.com/mcuadros/go-version"
+	ctlcorev1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	"github.com/rancher/wrangler/pkg/slice"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
@@ -23,10 +27,15 @@ import (
 
 const (
 	syncInterval = time.Hour
+
+	extraInfoNodeCount  = "nodeCount"
+	extraInfoCPUCount   = "cpuCount"
+	extraInfoMemorySize = "memorySize"
 )
 
 type CheckUpgradeRequest struct {
-	AppVersion string `json:"appVersion"`
+	AppVersion string            `json:"appVersion"`
+	ExtraInfo  map[string]string `json:"extraInfo"`
 }
 
 type CheckUpgradeResponse struct {
@@ -47,17 +56,22 @@ type versionSyncer struct {
 
 	versionClient ctlharvesterv1.VersionClient
 	versionCache  ctlharvesterv1.VersionCache
+
+	nodeClient ctlcorev1.NodeClient
+	nodeCache  ctlcorev1.NodeCache
 }
 
-func newVersionSyncer(ctx context.Context, namespace string, versionClient ctlharvesterv1.VersionClient, versionCache ctlharvesterv1.VersionCache) *versionSyncer {
+func newVersionSyncer(ctx context.Context, namespace string, versions ctlharvesterv1.VersionController, nodes ctlcorev1.NodeController) *versionSyncer {
 	return &versionSyncer{
 		ctx:       ctx,
 		namespace: namespace,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		versionClient: versionClient,
-		versionCache:  versionCache,
+		versionClient: versions,
+		versionCache:  versions.Cache(),
+		nodeClient:    nodes,
+		nodeCache:     nodes.Cache(),
 	}
 }
 
@@ -82,8 +96,13 @@ func (s *versionSyncer) sync() error {
 	if upgradeCheckerEnabled != "true" || upgradeCheckerURL == "" {
 		return nil
 	}
+	extraInfo, err := s.getExtraInfo()
+	if err != nil {
+		return err
+	}
 	req := &CheckUpgradeRequest{
 		AppVersion: settings.ServerVersion.Get(),
+		ExtraInfo:  extraInfo,
 	}
 	var requestBody bytes.Buffer
 	if err := json.NewEncoder(&requestBody).Encode(req); err != nil {
@@ -105,6 +124,24 @@ func (s *versionSyncer) sync() error {
 
 	current := settings.ServerVersion.Get()
 	return s.syncVersions(checkResp, current)
+}
+
+func (s *versionSyncer) getExtraInfo() (map[string]string, error) {
+	nodes, err := s.nodeClient.List(metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	extraInfo := map[string]string{}
+	cpu := resource.NewQuantity(0, resource.BinarySI)
+	memory := resource.NewQuantity(0, resource.BinarySI)
+	for _, node := range nodes.Items {
+		cpu.Add(*node.Status.Capacity.Cpu())
+		memory.Add(*node.Status.Capacity.Memory())
+	}
+	extraInfo[extraInfoCPUCount] = cpu.String()
+	extraInfo[extraInfoMemorySize] = formatQuantityToGi(memory)
+	extraInfo[extraInfoNodeCount] = strconv.Itoa(len(nodes.Items))
+	return extraInfo, nil
 }
 
 func (s *versionSyncer) syncVersions(resp CheckUpgradeResponse, currentVersion string) error {
@@ -195,4 +232,13 @@ func canUpgrade(currentVersion string, newVersion *harvesterv1.Version) bool {
 	default:
 		return false
 	}
+}
+
+func formatQuantityToGi(q *resource.Quantity) string {
+	// 32920204Ki,
+	// q.Value(): 32920204*1024=33710288896
+	// math.Pow(1024, 3): 1024*1024*1024=1073741824
+	// float64(q.Value())/math.Pow(1024, 3): 33710288896/1073741824=31.3951530456543
+	// math.Ceil(31.3951530456543)=32
+	return fmt.Sprintf("%dGi", int64(math.Ceil(float64(q.Value())/math.Pow(1024, 3))))
 }

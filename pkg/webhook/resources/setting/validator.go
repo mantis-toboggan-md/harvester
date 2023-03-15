@@ -13,8 +13,11 @@ import (
 	"strings"
 
 	"github.com/longhorn/backupstore"
-	_ "github.com/longhorn/backupstore/nfs"
-	_ "github.com/longhorn/backupstore/s3"
+	// Although we don't use following drivers directly, we need to import them to register drivers.
+	// NFS Ref: https://github.com/longhorn/backupstore/blob/3912081eb7c5708f0027ebbb0da4934537eb9d72/nfs/nfs.go#L47-L51
+	// S3 Ref: https://github.com/longhorn/backupstore/blob/3912081eb7c5708f0027ebbb0da4934537eb9d72/s3/s3.go#L33-L37
+	_ "github.com/longhorn/backupstore/nfs" //nolint
+	_ "github.com/longhorn/backupstore/s3"  //nolint
 	"github.com/rancher/wharfie/pkg/registries"
 	"github.com/rancher/wrangler/pkg/slice"
 	"github.com/sirupsen/logrus"
@@ -48,7 +51,7 @@ var supportedSSLProtocols = []string{"SSLv2", "SSLv3", "TLSv1", "TLSv1.1", "TLSv
 type validateSettingFunc func(setting *v1beta1.Setting) error
 
 var validateSettingFuncs = map[string]validateSettingFunc{
-	settings.HttpProxySettingName:            validateHTTPProxy,
+	settings.HTTPProxySettingName:            validateHTTPProxy,
 	settings.VMForceResetPolicySettingName:   validateVMForceResetPolicy,
 	settings.SupportBundleImageName:          validateSupportBundleImage,
 	settings.SupportBundleTimeoutSettingName: validateSupportBundleTimeout,
@@ -62,7 +65,7 @@ var validateSettingFuncs = map[string]validateSettingFunc{
 type validateSettingUpdateFunc func(oldSetting *v1beta1.Setting, newSetting *v1beta1.Setting) error
 
 var validateSettingUpdateFuncs = map[string]validateSettingUpdateFunc{
-	settings.HttpProxySettingName:            validateUpdateHTTPProxy,
+	settings.HTTPProxySettingName:            validateUpdateHTTPProxy,
 	settings.VMForceResetPolicySettingName:   validateUpdateVMForceResetPolicy,
 	settings.SupportBundleImageName:          validateUpdateSupportBundleImage,
 	settings.SupportBundleTimeoutSettingName: validateUpdateSupportBundleTimeout,
@@ -197,8 +200,8 @@ func validateOvercommitConfig(setting *v1beta1.Setting) error {
 		msg := fmt.Sprintf("Cannot undercommit. Should be greater than or equal to 100 but got %d", percentage)
 		return werror.NewInvalidError(msg, field)
 	}
-	if overcommit.Cpu < 100 {
-		return emit(overcommit.Cpu, "cpu")
+	if overcommit.CPU < 100 {
+		return emit(overcommit.CPU, "cpu")
 	}
 	if overcommit.Memory < 100 {
 		return emit(overcommit.Memory, "memory")
@@ -352,7 +355,7 @@ func (v *settingValidator) validateBackupTarget(setting *v1beta1.Setting) error 
 // customizeTransport sets HTTP proxy and trusted CAs in the default HTTP transport.
 // The transport used in the library is a one-time cache. Overwrite to update dynamically.
 func (v *settingValidator) customizeTransport() error {
-	httpProxySetting, err := v.settingCache.Get(settings.HttpProxySettingName)
+	httpProxySetting, err := v.settingCache.Get(settings.HTTPProxySettingName)
 	if err != nil {
 		return fmt.Errorf("failed to get HTTP proxy setting: %v", err)
 	}

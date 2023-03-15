@@ -100,10 +100,12 @@ wait_capi_cluster() {
 
     if [ "$current_generation" -gt "$generation" ]; then
       if [ "$current_phase" = "Provisioned" ]; then
+        echo "CAPI cluster $namespace/$name is provisioned (current generation: $current_generation)."
         break
       fi
     fi
 
+    echo "Waiting for CAPI cluster $namespace/$name to be provisioned (current phase: $current_phase, current generation: $current_generation)..."
     sleep 5
   done
 }
@@ -344,6 +346,7 @@ get_all_running_vm_count() {
 
 delete_canal_flannel_iface() {
   kubectl delete helmchartconfig rke2-canal -n kube-system || true
+  kubectl patch configmap rke2-canal-config -n kube-system -p '{"data":{"canal_iface": ""}}' --type merge
 }
 
 modify_nad_bridge() {
@@ -391,6 +394,12 @@ EOF
 
   upgrade_managed_chart_from_version $UPGRADE_PREVIOUS_VERSION harvester harvester.yaml
   NEW_VERSION=$REPO_HARVESTER_CHART_VERSION yq e '.spec.version = strenv(NEW_VERSION)' harvester.yaml -i
+
+  local sc=$(kubectl get sc -o json | jq '.items[] | select(.metadata.annotations."storageclass.kubernetes.io/is-default-class" == "true" and .metadata.name != "harvester-longhorn")')
+  if [ -n "$sc" ] && [ "$UPGRADE_PREVIOUS_VERSION" != "v1.0.3" ]; then
+      yq e '.spec.values.storageClass.defaultStorageClass = false' -i harvester.yaml
+  fi
+
   kubectl apply -f ./harvester.yaml
 
   pause_managed_chart harvester "false"
@@ -613,7 +622,7 @@ pause_all_charts() {
 
 upgrade_addons()
 {
- local is_upgrade_required=$(lower_version_check $UPGRADE_PREVIOUS_VERSION v1.1.0)
+ local is_upgrade_required=$(lower_version_check $UPGRADE_PREVIOUS_VERSION v1.1.1)
  if [ ! -z "$is_upgrade_required" ]; then
    wait_for_addons_crd
   addons="vm-import-controller pcidevices-controller"

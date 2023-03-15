@@ -17,6 +17,12 @@ import (
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
 	"github.com/longhorn/backupstore"
+
+	// Although we don't use following drivers directly, we need to import them to register drivers.
+	// NFS Ref: https://github.com/longhorn/backupstore/blob/3912081eb7c5708f0027ebbb0da4934537eb9d72/nfs/nfs.go#L47-L51
+	// S3 Ref: https://github.com/longhorn/backupstore/blob/3912081eb7c5708f0027ebbb0da4934537eb9d72/s3/s3.go#L33-L37
+	_ "github.com/longhorn/backupstore/nfs" //nolint
+	_ "github.com/longhorn/backupstore/s3"  //nolint
 	ctlcorev1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	ctlstoragev1 "github.com/rancher/wrangler/pkg/generated/controllers/storage/v1"
 	"github.com/sirupsen/logrus"
@@ -176,8 +182,10 @@ func (h *Handler) OnBackupRemove(key string, vmBackup *harvesterv1.VirtualMachin
 		return nil, err
 	}
 
-	if err := h.deleteVMBackupMetadata(vmBackup, target); err != nil {
-		return nil, err
+	if !target.IsDefaultBackupTarget() {
+		if err := h.deleteVMBackupMetadata(vmBackup, target); err != nil {
+			return nil, err
+		}
 	}
 
 	// Since VolumeSnapshot and VolumeSnapshotContent has finalizers,
@@ -272,23 +280,23 @@ func (h *Handler) getCSIDriverMap(backup *harvesterv1.VirtualMachineBackup) (map
 			continue
 		}
 
-		if driverInfo, ok := csiDriverConfig[csiDriverName]; !ok {
+		driverInfo, ok := csiDriverConfig[csiDriverName]
+		if !ok {
 			return nil, nil, fmt.Errorf("can't find CSI driver %s in setting CSIDriverInfo", csiDriverName)
-		} else {
-			volumeSnapshotClassName := ""
-			switch backup.Spec.Type {
-			case harvesterv1.Backup:
-				volumeSnapshotClassName = driverInfo.BackupVolumeSnapshotClassName
-			case harvesterv1.Snapshot:
-				volumeSnapshotClassName = driverInfo.VolumeSnapshotClassName
-			}
-			volumeSnapshotClass, err := h.snapshotClassCache.Get(volumeSnapshotClassName)
-			if err != nil {
-				return nil, nil, fmt.Errorf("can't find volumeSnapshotClass %s for CSI driver %s", volumeSnapshotClassName, csiDriverName)
-			}
-			csiDriverVolumeSnapshotClassNameMap[csiDriverName] = volumeSnapshotClassName
-			csiDriverVolumeSnapshotClassMap[csiDriverName] = *volumeSnapshotClass
 		}
+		volumeSnapshotClassName := ""
+		switch backup.Spec.Type {
+		case harvesterv1.Backup:
+			volumeSnapshotClassName = driverInfo.BackupVolumeSnapshotClassName
+		case harvesterv1.Snapshot:
+			volumeSnapshotClassName = driverInfo.VolumeSnapshotClassName
+		}
+		volumeSnapshotClass, err := h.snapshotClassCache.Get(volumeSnapshotClassName)
+		if err != nil {
+			return nil, nil, fmt.Errorf("can't find volumeSnapshotClass %s for CSI driver %s", volumeSnapshotClassName, csiDriverName)
+		}
+		csiDriverVolumeSnapshotClassNameMap[csiDriverName] = volumeSnapshotClassName
+		csiDriverVolumeSnapshotClassMap[csiDriverName] = *volumeSnapshotClass
 	}
 
 	return csiDriverVolumeSnapshotClassNameMap, csiDriverVolumeSnapshotClassMap, nil
@@ -666,17 +674,15 @@ func (h *Handler) deleteVMBackupMetadata(vmBackup *harvesterv1.VirtualMachineBac
 	return nil
 }
 
-func (h *Handler) uploadVMBackupMetadata(vmBackup *harvesterv1.VirtualMachineBackup, target *settings.BackupTarget) error {
-	var err error
+func (h *Handler) uploadVMBackupMetadata(vmBackup *harvesterv1.VirtualMachineBackup) error {
 	// if users don't update VMBackup CRD, we may lose backup target data.
 	if vmBackup.Status.BackupTarget == nil {
 		return fmt.Errorf("no backup target in vmbackup.status")
 	}
 
-	if target == nil {
-		if target, err = settings.DecodeBackupTarget(settings.BackupTargetSet.Get()); err != nil {
-			return err
-		}
+	target, err := settings.DecodeBackupTarget(settings.BackupTargetSet.Get())
+	if err != nil {
+		return err
 	}
 
 	// when current backup target is default, skip following steps
@@ -852,7 +858,7 @@ func (h *Handler) handleBackupReady(vmBackup *harvesterv1.VirtualMachineBackup) 
 	}
 
 	// generate vm backup metadata and upload to backup target
-	return h.uploadVMBackupMetadata(vmBackup, nil)
+	return h.uploadVMBackupMetadata(vmBackup)
 }
 
 func (h *Handler) configureCSIDriverVolumeSnapshotClassNames(vmBackup *harvesterv1.VirtualMachineBackup) (*harvesterv1.VirtualMachineBackup, error) {

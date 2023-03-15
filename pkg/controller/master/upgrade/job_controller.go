@@ -21,6 +21,8 @@ import (
 
 const (
 	StateUpgrading               = "Upgrading"
+	StatePreparingLoggingInfra   = "PreparingLoggingInfra"
+	StateLoggingInfraPrepared    = "LoggingInfraPrepared"
 	StateCreatingUpgradeImage    = "CreatingUpgradeImage"
 	StatePreparingRepo           = "PreparingRepo"
 	StateRepoPrepared            = "RepoPrepared"
@@ -269,7 +271,7 @@ func (h *jobHandler) syncManifestJob(job *batchv1.Job) (*batchv1.Job, error) {
 	return job, nil
 }
 
-func (h *jobHandler) setNodeWaitRebootLabel(node *v1.Node, repoInfo *UpgradeRepoInfo) error {
+func (h *jobHandler) setNodeWaitRebootLabel(node *v1.Node, repoInfo *RepoInfo) error {
 	nodeUpdate := node.DeepCopy()
 	nodeUpdate.Annotations[harvesterNodePendingOSImage] = repoInfo.Release.OS
 	_, err := h.nodeClient.Update(nodeUpdate)

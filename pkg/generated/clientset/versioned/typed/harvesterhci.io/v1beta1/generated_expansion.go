@@ -1,5 +1,5 @@
 /*
-Copyright 2022 Rancher Labs, Inc.
+Copyright 2023 Rancher Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,8 @@ type SettingExpansion interface{}
 type SupportBundleExpansion interface{}
 
 type UpgradeExpansion interface{}
+
+type UpgradeLogExpansion interface{}
 
 type VersionExpansion interface{}
 

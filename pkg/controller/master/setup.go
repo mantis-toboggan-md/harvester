@@ -3,23 +3,24 @@ package master
 import (
 	"context"
 
-	"github.com/harvester/harvester/pkg/controller/master/addon"
-
 	"github.com/rancher/steve/pkg/server"
 	"github.com/rancher/wrangler/pkg/leader"
 
 	"github.com/harvester/harvester/pkg/config"
+	"github.com/harvester/harvester/pkg/controller/master/addon"
 	"github.com/harvester/harvester/pkg/controller/master/backup"
 	"github.com/harvester/harvester/pkg/controller/master/image"
 	"github.com/harvester/harvester/pkg/controller/master/keypair"
 	"github.com/harvester/harvester/pkg/controller/master/migration"
 	"github.com/harvester/harvester/pkg/controller/master/node"
+	"github.com/harvester/harvester/pkg/controller/master/nodedrain"
 	"github.com/harvester/harvester/pkg/controller/master/rancher"
 	"github.com/harvester/harvester/pkg/controller/master/setting"
 	"github.com/harvester/harvester/pkg/controller/master/storagenetwork"
 	"github.com/harvester/harvester/pkg/controller/master/supportbundle"
 	"github.com/harvester/harvester/pkg/controller/master/template"
 	"github.com/harvester/harvester/pkg/controller/master/upgrade"
+	"github.com/harvester/harvester/pkg/controller/master/upgradelog"
 	"github.com/harvester/harvester/pkg/controller/master/virtualmachine"
 )
 
@@ -31,7 +32,7 @@ var registerFuncs = []registerFunc{
 	migration.Register,
 	node.PromoteRegister,
 	node.MaintainRegister,
-	node.NodeDownRegister,
+	node.DownRegister,
 	setting.Register,
 	template.Register,
 	virtualmachine.Register,
@@ -42,8 +43,10 @@ var registerFuncs = []registerFunc{
 	supportbundle.Register,
 	rancher.Register,
 	upgrade.Register,
+	upgradelog.Register,
 	addon.Register,
 	storagenetwork.Register,
+	nodedrain.Register,
 }
 
 func register(ctx context.Context, management *config.Management, options config.Options) error {

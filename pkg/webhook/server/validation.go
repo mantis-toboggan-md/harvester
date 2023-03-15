@@ -36,16 +36,20 @@ func Validation(clients *clients.Clients, options *config.Options) (http.Handler
 		virtualmachineimage.NewValidator(
 			clients.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineImage().Cache(),
 			clients.Core.PersistentVolumeClaim().Cache(),
-			clients.K8s.AuthorizationV1().SelfSubjectAccessReviews()),
+			clients.K8s.AuthorizationV1().SelfSubjectAccessReviews(),
+			clients.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineTemplateVersion().Cache()),
 		upgrade.NewValidator(
 			clients.HarvesterFactory.Harvesterhci().V1beta1().Upgrade().Cache(),
 			clients.Core.Node().Cache(),
 			clients.LonghornFactory.Longhorn().V1beta1().Volume().Cache(),
 			clients.ClusterFactory.Cluster().V1alpha4().Cluster().Cache(),
+			clients.ClusterFactory.Cluster().V1alpha4().Machine().Cache(),
+			clients.RancherManagementFactory.Management().V3().ManagedChart().Cache(),
 		),
 		virtualmachinebackup.NewValidator(
 			clients.KubevirtFactory.Kubevirt().V1().VirtualMachine().Cache(),
 			clients.HarvesterFactory.Harvesterhci().V1beta1().Setting().Cache(),
+			clients.HarvesterFactory.Harvesterhci().V1beta1().VirtualMachineRestore().Cache(),
 		),
 		virtualmachinerestore.NewValidator(
 			clients.KubevirtFactory.Kubevirt().V1().VirtualMachine().Cache(),

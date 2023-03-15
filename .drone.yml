@@ -21,7 +21,7 @@ steps:
       - tag
 
 - name: build
-  image: rancher/dapper:v0.4.1
+  image: rancher/dapper:v0.5.8
   environment:
     CODECOV_TOKEN:
       from_secret: codecov_token
@@ -32,7 +32,7 @@ steps:
     path: /var/run/docker.sock
 
 - name: stage-binaries
-  image: rancher/dapper:v0.5.2
+  image: rancher/dapper:v0.5.8
   commands:
   - "cp -r ./bin/* ./package/"
   when:
@@ -182,6 +182,11 @@ steps:
     event:
     - tag
 
+trigger:
+  branch:
+    exclude:
+    - mergify/**
+
 volumes:
 - name: docker
   host:
@@ -313,6 +318,11 @@ steps:
     event:
     - tag
 
+trigger:
+  branch:
+    exclude:
+    - mergify/**
+
 depends_on:
 - amd64
 
@@ -339,7 +349,7 @@ steps:
       - tag
 
 - name: build
-  image: rancher/dapper:v0.4.1
+  image: rancher/dapper:v0.5.8
   commands:
   - dapper build-iso
   volumes:
@@ -380,6 +390,24 @@ steps:
       - drone-publish.rancher.io
     event:
       - push
+
+- name: upload_kernel_initrd_releases
+  image: plugins/github-release
+  settings:
+    prerelease: true
+    draft: true
+    checksum:
+      - sha256
+    files:
+    - "dist/artifacts/harvester*initrd-amd64"
+    - "dist/artifacts/harvester*vmlinuz-amd64"
+    api_key:
+      from_secret: github_token
+  when:
+    instance:
+      - drone-publish.rancher.io
+    event:
+      - tag
 
 trigger:
   event:

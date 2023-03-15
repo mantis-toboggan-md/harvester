@@ -27,7 +27,7 @@ kubevirt-operator:
     operator:
       image:
         repository: registry.suse.com/suse/sles/15.4/virt-operator
-        tag: &kubevirtVersion 0.54.0-150400.3.3.2
+        tag: &kubevirtVersion 0.54.0-150400.3.7.1
     ## The following images are placeholder for images in use.
     ## They are not used by the kubevirt-operator chart.
     controller:
@@ -92,6 +92,25 @@ kubevirt:
       ## defaults to discover automatically, "pseries*" if arch is ppc64le, otherwise "q35, pc-g35*, pc, pc-i440fx*".
       ##
       emulatedMachines: ["q35","pc-q35*","pc","pc-i440fx*"]
+
+    customizeComponents:
+      patches:
+        - patch: '{"webhooks":[{"name":"kubevirt-validator.kubevirt.io","failurePolicy":"Ignore"},{"name":"kubevirt-update-validator.kubevirt.io","failurePolicy":"Ignore"}]}'
+          resourceName: virt-operator-validator
+          resourceType: ValidatingWebhookConfiguration
+          type: strategic
+        - patch: '{"spec":{"template":{"spec":{"containers":[{"name":"virt-api", "resources":{"limits":{"cpu":"400m","memory":"1100Mi"}}}]}}}}'
+          resourceName: virt-api
+          resourceType: Deployment
+          type: strategic
+        - patch: '{"spec":{"template":{"spec":{"containers":[{"name":"virt-controller", "resources":{"limits":{"cpu":"800m","memory":"1300Mi"}}}]}}}}'
+          resourceName: virt-controller
+          resourceType: Deployment
+          type: strategic
+        - patch: '{"spec":{"template":{"spec":{"containers":[{"name":"virt-handler", "resources":{"limits":{"cpu":"700m","memory":"1600Mi"}}}]}}}}'
+          resourceName: virt-handler
+          resourceType: DaemonSet
+          type: strategic
 
 ###########################################################################
 ###########################################################################
@@ -330,6 +349,14 @@ jobs:
             cpu: 250m
             memory: 128Mi
 
+storageClass:
+  ## Specify the default Storage Class of harvester-longhorn.
+  ## Will be set "false" when upgrading for existing default Storage Class.
+  ## defaults to "true".
+  defaultStorageClass: true
+  reclaimPolicy: Delete
+  replicaCount: 3
+
 harvester-network-controller:
   ## Specify to install harvester network controller,
   ## defaults to "false".
@@ -431,7 +458,7 @@ kube-vip:
   enabled: false
   image:
     repository: ghcr.io/kube-vip/kube-vip
-    tag: v0.4.4
+    tag: v0.5.10
   nodeSelector:
     node-role.kubernetes.io/control-plane: "true"
 
@@ -451,18 +478,18 @@ generalJob:
   image:
     imagePullPolicy: IfNotPresent
     repository: registry.suse.com/bci/bci-base
-    tag: 15.3
+    tag: 15.4
 
 whereabouts:
   enabled: true
   image:
     pullPolicy: IfNotPresent
     repository: ghcr.io/k8snetworkplumbingwg/whereabouts
-    tag: "v0.5.4-amd64"
+    tag: "v0.6.1-amd64"
 
 harvester-node-manager:
   image:
     imagePullPolicy: IfNotPresent
     repository: rancher/harvester-node-manager
-    tag: v0.1.1
+    tag: master-head
 

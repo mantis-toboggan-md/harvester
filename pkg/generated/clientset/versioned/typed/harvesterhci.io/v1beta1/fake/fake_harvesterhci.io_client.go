@@ -1,5 +1,5 @@
 /*
-Copyright 2022 Rancher Labs, Inc.
+Copyright 2023 Rancher Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -50,6 +50,10 @@ func (c *FakeHarvesterhciV1beta1) SupportBundles(namespace string) v1beta1.Suppo
 
 func (c *FakeHarvesterhciV1beta1) Upgrades(namespace string) v1beta1.UpgradeInterface {
 	return &FakeUpgrades{c, namespace}
+}
+
+func (c *FakeHarvesterhciV1beta1) UpgradeLogs(namespace string) v1beta1.UpgradeLogInterface {
+	return &FakeUpgradeLogs{c, namespace}
 }
 
 func (c *FakeHarvesterhciV1beta1) Versions(namespace string) v1beta1.VersionInterface {

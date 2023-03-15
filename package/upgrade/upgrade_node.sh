@@ -1,9 +1,31 @@
 #!/bin/bash -ex
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+ELEMENTAL_DIR="elemental_cli"
 
 source $SCRIPT_DIR/lib.sh
 UPGRADE_TMP_DIR=$HOST_DIR/usr/local/upgrade_tmp
+
+clean_up_tmp_files()
+{
+  if [ -n "$tmp_rootfs_mount" ]; then
+    echo "Try to unmount $tmp_rootfs_mount..."
+    umount $tmp_rootfs_mount || echo "Umount $tmp_rootfs_mount failed with return code: $?"
+  fi
+  if [ -n "$target_elemental_cli" ]; then
+    echo "Try to unmount $target_elemental_cli..."
+    umount $target_elemental_cli || echo "Umount $target_elemental_cli failed with return code: $?"
+  fi
+  echo "Clean up tmp files..."
+  if [ -n "$NEW_OS_SQUASHFS_IMAGE_FILE" ]; then
+    echo "Try to remove $NEW_OS_SQUASHFS_IMAGE_FILE..."
+    rm -vf "$NEW_OS_SQUASHFS_IMAGE_FILE"
+  fi
+  if [ -n "$tmp_rootfs_squashfs" ]; then
+    echo "Try to remove $tmp_rootfs_squashfs..."
+    rm -vf "$tmp_rootfs_squashfs"
+  fi
+}
 
 # Create a systemd service on host to reboot the host if this running pod succeeds.
 # This prevents job become from entering `Error`.
@@ -164,14 +186,42 @@ shutdown_non_migrate_able_vms()
     done
 
   # VMs with nodeAffinity
+  # Skip only when the VMs have other places to go
+  local node_labels=""
+  local node_count=0
   kubectl get vmi -A -l kubevirt.io/nodeName=$HARVESTER_UPGRADE_NODE_NAME -o json |
     jq -r '.items[] | select(.spec.affinity.nodeAffinity != null) | [.metadata.name, .metadata.namespace] | @tsv' |
     while IFS=$'\t' read -r name namespace; do
       if [ -z "$name" ]; then
         break
       fi
-      echo "Stop ${namespace}/${name}"
-      virtctl stop $name -n $namespace
+      node_labels=$(kubectl -n "$namespace" get vmi "$name" -o yaml |
+        yq '.spec.affinity.nodeAffinity.*.nodeSelectorTerms[].matchExpressions[] | select(.operator=="In" and .values[] == "true") | .key')
+      for nl in $node_labels; do
+        # For nodes considered "candidates" for the VM to live-migrate to, they should
+        # 1. match the same labels as nodeAffinity described
+        # 2. not be the node that the VM currently runs on
+        # 3. be schedulable at the time
+        node_count=$(kubectl get nodes -o yaml |
+                nl="$nl" n="$HARVESTER_UPGRADE_NODE_NAME" yq '.items[] | select(.metadata.labels.[env(nl)] == "true" and .metadata.name != env(n) and .spec.unschedulable == null) | .metadata.name' | wc -l)
+
+        if [ "$node_count" -gt 0 ]; then
+          # If such nodes exist, continue to check for the next label
+          echo "$namespace/$name still has $node_count place(s) to go for label $nl"
+          continue
+        else
+          # If there is no candidates for any of the labels, just break the loop and shut the VM down
+          echo "$namespace/$name has no other places to go for label $nl"
+          break
+        fi
+      done
+
+      if [ $node_count -gt 0 ]; then
+        echo "$namespace/$name is considered live-migratable"
+      else
+        echo "$namespace/$name is non-migratable, shutdown immediately"
+        virtctl stop "$name" -n "$namespace"
+      fi
     done
 }
 
@@ -245,11 +295,12 @@ patch_logging_event_audit()
   # should happen before RKE2 is patched
   # note: the host '/' is mapped to pod '/host/', refer: pkg/controller/master/upgrade/common.go applyNodeJob
 
-  # get UPGRADE_PREVIOUS_VERSION
+  # get UPGRADE_PREVIOUS_VERSION and NODE_CURRENT_HARVESTER_VERSION
   detect_upgrade
-  echo "The current version is $UPGRADE_PREVIOUS_VERSION, will check Logging Event Audit upgrade node option"
+  detect_node_current_harvester_version
+  echo "The UPGRADE_PREVIOUS_VERSION is $UPGRADE_PREVIOUS_VERSION, NODE_CURRENT_HARVESTER_VERSION is $NODE_CURRENT_HARVESTER_VERSION, will check Logging Event Audit upgrade node option"
 
-  if test "$UPGRADE_PREVIOUS_VERSION" = "v1.0.3"; then
+  if test "$UPGRADE_PREVIOUS_VERSION" = "v1.0.3" || test "$NODE_CURRENT_HARVESTER_VERSION" = "v1.0.3"; then
     echo "Patch kube-audit policy file"
     # this file should be there in each NODE
     # keep syncing with harvester/harvester-installer/pkg/config/templates/rke2-92-harvester-kube-audit-policy.yaml
@@ -258,9 +309,11 @@ patch_logging_event_audit()
 
     KUBE_AUDIT_POLICY_FILE_IN_CONTAINER=/host/etc/rancher/rke2/config.yaml.d/92-harvester-kube-audit-policy.yaml
     KUBE_AUDIT_POLICY_FILE_IN_HOST=/etc/rancher/rke2/config.yaml.d/92-harvester-kube-audit-policy.yaml
-    echo "Create new file $KUBE_AUDIT_POLICY_FILE_IN_CONTAINER"
 
-    cat > $KUBE_AUDIT_POLICY_FILE_IN_CONTAINER << 'EOF'
+    if [ ! -f $KUBE_AUDIT_POLICY_FILE_IN_CONTAINER ]; then
+      echo "Create new policy file $KUBE_AUDIT_POLICY_FILE_IN_CONTAINER"
+
+      cat > $KUBE_AUDIT_POLICY_FILE_IN_CONTAINER << 'EOF'
 apiVersion: audit.k8s.io/v1
 kind: Policy
 omitStages:
@@ -277,15 +330,32 @@ rules:
       - "ResponseComplete"
 EOF
 
+    else
+      echo "Reuse the existing policy file $KUBE_AUDIT_POLICY_FILE_IN_CONTAINER, the file content is:"
+      cat $KUBE_AUDIT_POLICY_FILE_IN_CONTAINER
+    fi
+
     # it means the NODE role is rke2-server when 90-harvester-server.yaml exists, patch it
     RKE2_SERVER_CONFIG_FILE_IN_CONTAINER=/host/etc/rancher/rke2/config.yaml.d/90-harvester-server.yaml
     PATCH_SERVER_IN_CUSTOM=1
+    local param=audit-policy-file
+
     if [ -f "$RKE2_SERVER_CONFIG_FILE_IN_CONTAINER" ]; then
-      echo "Patch rke2 server config file with audit-policy-file parameter"
-      echo "audit-policy-file: $KUBE_AUDIT_POLICY_FILE_IN_HOST" >> $RKE2_SERVER_CONFIG_FILE_IN_CONTAINER
+      local audit_policy_file_param=$(yq e '.'$param $RKE2_SERVER_CONFIG_FILE_IN_CONTAINER)
+
+      if [ "$audit_policy_file_param" == "null" ]; then
+        echo "$param parameter is not in $RKE2_SERVER_CONFIG_FILE_IN_CONTAINER"
+        echo "Patch rke2 server config file with $param parameter"
+        echo "$param: $KUBE_AUDIT_POLICY_FILE_IN_HOST" >> $RKE2_SERVER_CONFIG_FILE_IN_CONTAINER
+        echo "After patch, the file content is"
+        cat $RKE2_SERVER_CONFIG_FILE_IN_CONTAINER
+      else
+        echo "$param parameter is in $RKE2_SERVER_CONFIG_FILE_IN_CONTAINER, value: $audit_policy_file_param, skip patch"
+      fi
+
     else
       # for rke2-agent node, do nothing now, this file will be patched when the node is promoted to server
-      echo "There is no rke2 server file, this node should be rke2 agent, audit-policy-file parameter is not patched"
+      echo "There is no file $RKE2_SERVER_CONFIG_FILE_IN_CONTAINER, $param parameter is not patched"
       PATCH_SERVER_IN_CUSTOM=0
     fi
 
@@ -315,6 +385,8 @@ command_pre_drain() {
 
   # Add logging related kube-audit policy file
   patch_logging_event_audit
+
+  remove_rke2_canal_config
 }
 
 get_node_rke2_version() {
@@ -352,21 +424,37 @@ clean_rke2_archives() {
     done
 }
 
+remove_rke2_canal_config() {
+  rm -f "$HOST_DIR/var/lib/rancher/rke2/server/manifests/rke2-canal-config.yaml"
+}
+
 convert_nodenetwork_to_vlanconfig() {
   detect_upgrade
+  detect_node_current_harvester_version
+  echo "The UPGRADE_PREVIOUS_VERSION is $UPGRADE_PREVIOUS_VERSION, NODE_CURRENT_HARVESTER_VERSION is $NODE_CURRENT_HARVESTER_VERSION, will check nodenetwork upgrade node option"
 
-  [[ $UPGRADE_PREVIOUS_VERSION != "v1.0.3" ]] && return
+  if test "$UPGRADE_PREVIOUS_VERSION" != "v1.0.3" && test "$NODE_CURRENT_HARVESTER_VERSION" != "v1.0.3"; then
+    echo "There is nothing to do in nodenetwork"
+    return
+  fi
 
   # Don't need to convert nodenetwork if harvester-mgmt is used as vlan interface in any nodenetwork
   [[ $(kubectl get nodenetwork -o yaml | yq '.items[].spec.nic | select(. == "harvester-mgmt")') ]] &&
   echo "Don't need to convert nodenetwork because harvester-mgmt is used as VLAN interface in not less than one nodenetwork" && return
 
   local name=${HARVESTER_UPGRADE_NODE_NAME}-vlan
+  local EXIT_CODE=$?
+  # when object is not existing, kubectl will return 1
+  nn=$(kubectl get nodenetwork "$name" -o yaml) || EXIT_CODE=$?
+  if [ $EXIT_CODE != 0 ]; then
+    echo "Cannot find nodenetwork $name, skip patch"
+    return
+  fi
 
-  nn=$(kubectl get nn "$name" -o yaml)
   vlan_interface=$(echo "$nn" | yq '.spec.nic')
 
-  [[ "$vlan_interface" == "null" ]] && echo "Invalid nodenetwork $name" && return
+  # the default ${HARVESTER_UPGRADE_NODE_NAME}-vlan has no nics
+  [[ "$vlan_interface" == "null" ]] && echo "Default/invalid nodenetwork $name without any nics, skip patch" && return
 
   type=$(echo "$nn" | yq e '.spec.nic as $nic | .status.networkLinkStatus.[$nic].type')
   if [ "$type" == "bond" ]; then
@@ -381,6 +469,8 @@ convert_nodenetwork_to_vlanconfig() {
     mode="active-backup"
     miimon=0
   fi
+
+  # below code is idempotent
 
   kubectl apply -f - <<EOF
 apiVersion: network.harvesterhci.io/v1beta1
@@ -402,6 +492,9 @@ EOF
 }
 
 upgrade_os() {
+  # The trap will be only effective from this point to the end of the execution
+  trap clean_up_tmp_files EXIT
+
   CURRENT_OS_VERSION=$(source $HOST_DIR/etc/os-release && echo $PRETTY_NAME)
 
   if [ "$REPO_OS_PRETTY_NAME" = "$CURRENT_OS_VERSION" ]; then
@@ -410,24 +503,40 @@ upgrade_os() {
   fi
   
   # upgrade OS image and reboot
-  mount --rbind $HOST_DIR/dev /dev
-  mount --rbind $HOST_DIR/run /run
-
   if [ -n "$NEW_OS_SQUASHFS_IMAGE_FILE" ]; then
     tmp_rootfs_squashfs="$NEW_OS_SQUASHFS_IMAGE_FILE"
   else
     tmp_rootfs_squashfs=$(mktemp -p $UPGRADE_TMP_DIR)
-    curl -fL $UPGRADE_REPO_SQUASHFS_IMAGE -o $tmp_rootfs_squashfs
+    download_file "$UPGRADE_REPO_SQUASHFS_IMAGE" "$tmp_rootfs_squashfs"
   fi
 
   tmp_rootfs_mount=$(mktemp -d -p $HOST_DIR/tmp)
   mount $tmp_rootfs_squashfs $tmp_rootfs_mount
 
-  chroot $HOST_DIR elemental upgrade --directory ${tmp_rootfs_mount#"$HOST_DIR"}
+  # replace the fixed elemental CLI for fix elemental upgrade issues
+  new_elemental_cli=$SCRIPT_DIR/$ELEMENTAL_DIR/elemental
+  target_elemental_cli=$HOST_DIR/usr/bin/elemental
+  elemental_upgrade_log="${UPGRADE_TMP_DIR#"$HOST_DIR"}/elemental-upgrade-$(date +%Y%m%d%H%M%S).log"
+  local ret=0
+  mount --bind $new_elemental_cli $target_elemental_cli
+  chroot $HOST_DIR elemental upgrade --logfile "$elemental_upgrade_log" --directory ${tmp_rootfs_mount#"$HOST_DIR"} || ret=$?
+  if [ "$ret" != 0 ]; then
+    echo "elemental upgrade failed with return code: $ret"
+    cat "$HOST_DIR$elemental_upgrade_log"
+    exit "$ret"
+  fi
+
+  # For some firmware (e.g., Dell BOSS adapter 3022), users may get
+  # stuck on the grub file search for about 30 minutes, this can be
+  # mitigated by adding the `grubenv` file.
+  #
+  # PATCH: add /oem/grubenv if it does not exist on upgrade_path
+  GRUBENV_FILE="/oem/grubenv"
+  chroot $HOST_DIR /bin/bash -c "if ! [ -f ${GRUBENV_FILE} ]; then grub2-editenv ${GRUBENV_FILE} create; fi"
+
+  umount $target_elemental_cli
   umount $tmp_rootfs_mount
   rm -rf $tmp_rootfs_squashfs
-
-  umount -R /run
 
   reboot_if_job_succeed
 }
@@ -464,9 +573,11 @@ command_single_node_upgrade() {
   wait_repo
   detect_repo
 
+  remove_rke2_canal_config
+
   # Copy OS things, we need to shutdown repo VMs.
   NEW_OS_SQUASHFS_IMAGE_FILE=$(mktemp -p $UPGRADE_TMP_DIR)
-  curl -fL $UPGRADE_REPO_SQUASHFS_IMAGE -o $NEW_OS_SQUASHFS_IMAGE_FILE
+  download_file "$UPGRADE_REPO_SQUASHFS_IMAGE" "$NEW_OS_SQUASHFS_IMAGE_FILE"
 
   # Stop all VMs
   shutdown_all_vms

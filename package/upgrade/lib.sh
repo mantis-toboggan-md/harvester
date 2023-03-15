@@ -8,10 +8,25 @@ UPGRADE_REPO_BUNDLE_METADATA="$UPGRADE_REPO_URL/bundle/metadata.yaml"
 CACHED_BUNDLE_METADATA=""
 HOST_DIR="${HOST_DIR:-/host}"
 
+download_file()
+{
+  local url=$1
+  local output=$2
+
+  echo "Downloading the file from \"$url\" to \"$output\"..."
+  local i=0
+  while [[ "$i" -lt 100 ]]; do
+    curl -sSfL "$url" -o "$output" && break
+    echo "Failed to download the requested file from \"$url\" to \"$output\" with error code: $?, retrying ($i)..."
+    sleep 10
+    i=$((i + 1))
+  done
+}
+
 detect_repo()
 {
   release_file=$(mktemp --suffix=.yaml)
-  curl -sfL $UPGRADE_REPO_RELEASE_FILE -o $release_file
+  download_file "$UPGRADE_REPO_RELEASE_FILE" "$release_file"
 
   REPO_HARVESTER_VERSION=$(yq -e e '.harvester' $release_file)
   REPO_HARVESTER_CHART_VERSION=$(yq -e e '.harvesterChart' $release_file)
@@ -96,25 +111,36 @@ detect_repo()
   fi
 
   CACHED_BUNDLE_METADATA=$(mktemp --suffix=.yaml)
-  curl -sfL "$UPGRADE_REPO_BUNDLE_METADATA" -o "$CACHED_BUNDLE_METADATA"
+  download_file "$UPGRADE_REPO_BUNDLE_METADATA" "$CACHED_BUNDLE_METADATA"
 }
 
 check_version()
 {
-  CURRENT_VERSION=${UPGRADE_PREVIOUS_VERSION#v}
-  MIN_UPGRADABLE_VERSION=${REPO_HARVESTER_MIN_UPGRADABLE_VERSION#v}
+  local current_version="${UPGRADE_PREVIOUS_VERSION#v}"
+  local min_upgradable_version="${REPO_HARVESTER_MIN_UPGRADABLE_VERSION#v}"
 
-  echo "Current version: $CURRENT_VERSION"
-  echo "Minimum upgradable version: $MIN_UPGRADABLE_VERSION"
+  local is_rc=0
+  [[ "$current_version" =~ "-rc" ]] && is_rc=1
 
-  if [ -z "$MIN_UPGRADABLE_VERSION" ]; then
+  echo "Current version: $current_version"
+  echo "Minimum upgradable version: $min_upgradable_version"
+
+  if [ "$is_rc" = "1" ]; then
+    local current_version_rc_stripped="${current_version%-rc*}"
+    if [ "$current_version_rc_stripped" = "$min_upgradable_version" ]; then
+      echo "Current version is not supported. Abort the upgrade."
+      exit 1
+    fi
+  fi
+
+  if [ -z "$min_upgradable_version" ]; then
     echo "No restriction."
   else
-    VERSIONS_TO_COMPARE="${MIN_UPGRADABLE_VERSION}
-${CURRENT_VERSION}"
+    local versions_to_compare="$min_upgradable_version
+$current_version"
 
-  # Current Harvester version should be newer or equal to minimum upgradable version
-    if [ "$VERSIONS_TO_COMPARE" = "$(sort -V <<< "$VERSIONS_TO_COMPARE")" ]; then
+    # Current Harvester version should be newer or equal to minimum upgradable version
+    if [ "$versions_to_compare" = "$(sort -V <<< "$versions_to_compare")" ]; then
       echo "Current version is supported."
     else
       echo "Current version is not supported. Abort the upgrade."
@@ -200,11 +226,11 @@ download_image_archives_from_repo() {
       archive_file="$save_dir/$(basename $archive)"
 
       if [ ! -e $image_list_file ]; then
-        curl -fL $image_list_url -o $image_list_file
+        download_file "$image_list_url" "$image_list_file"
       fi
 
       if [ ! -e $archive_file ]; then
-        curl -fL $archive_url -o $archive_file
+        download_file "$archive_url" "$archive_file"
       fi
     done
 }
@@ -216,17 +242,29 @@ detect_upgrade()
   UPGRADE_PREVIOUS_VERSION=$(echo "$upgrade_obj" | yq e .status.previousVersion -)
 }
 
+# refer https://github.com/harvester/harvester/issues/3098
+detect_node_current_harvester_version()
+{
+  NODE_CURRENT_HARVESTER_VERSION=""
+  local harvester_release_file=/host/etc/harvester-release.yaml
+
+  if [ -f "$harvester_release_file" ]; then
+    NODE_CURRENT_HARVESTER_VERSION=$(yq e '.harvester' $harvester_release_file)
+    echo "NODE_CURRENT_HARVESTER_VERSION is: $NODE_CURRENT_HARVESTER_VERSION"
+  else
+    echo "$harvester_release_file is not existing, NODE_CURRENT_HARVESTER_VERSION is set as empty"
+  fi
+}
+
 upgrade_addon()
 {
   local name=$1
   local namespace=$2
-  local version=$3
 
-  version=$(cat /usr/local/share/addons/${name}.yaml | yq e .spec.version)
+  patch=$(cat /usr/local/share/addons/${name}.yaml | yq '{"spec": .spec | pick(["version", "valuesContent"])}')
 
   cat > addon-patch.yaml <<EOF
-spec:
-  version: $version
+$patch
 EOF
 
   item_count=$(kubectl get addons.harvesterhci $name -n $namespace -o  jsonpath='{..name}' || true)

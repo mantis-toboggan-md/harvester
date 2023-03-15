@@ -1,5 +1,5 @@
 /*
-Copyright 2022 Rancher Labs, Inc.
+Copyright 2023 Rancher Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ type Interface interface {
 	Setting() SettingController
 	SupportBundle() SupportBundleController
 	Upgrade() UpgradeController
+	UpgradeLog() UpgradeLogController
 	Version() VersionController
 	VirtualMachineBackup() VirtualMachineBackupController
 	VirtualMachineImage() VirtualMachineImageController
@@ -71,6 +72,9 @@ func (c *version) SupportBundle() SupportBundleController {
 }
 func (c *version) Upgrade() UpgradeController {
 	return NewUpgradeController(schema.GroupVersionKind{Group: "harvesterhci.io", Version: "v1beta1", Kind: "Upgrade"}, "upgrades", true, c.controllerFactory)
+}
+func (c *version) UpgradeLog() UpgradeLogController {
+	return NewUpgradeLogController(schema.GroupVersionKind{Group: "harvesterhci.io", Version: "v1beta1", Kind: "UpgradeLog"}, "upgradelogs", true, c.controllerFactory)
 }
 func (c *version) Version() VersionController {
 	return NewVersionController(schema.GroupVersionKind{Group: "harvesterhci.io", Version: "v1beta1", Kind: "Version"}, "versions", true, c.controllerFactory)

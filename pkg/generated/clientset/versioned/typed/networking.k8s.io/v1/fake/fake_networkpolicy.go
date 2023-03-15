@@ -1,5 +1,5 @@
 /*
-Copyright 2022 Rancher Labs, Inc.
+Copyright 2023 Rancher Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -95,6 +95,18 @@ func (c *FakeNetworkPolicies) Create(ctx context.Context, networkPolicy *network
 func (c *FakeNetworkPolicies) Update(ctx context.Context, networkPolicy *networkingv1.NetworkPolicy, opts v1.UpdateOptions) (result *networkingv1.NetworkPolicy, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewUpdateAction(networkpoliciesResource, c.ns, networkPolicy), &networkingv1.NetworkPolicy{})
+
+	if obj == nil {
+		return nil, err
+	}
+	return obj.(*networkingv1.NetworkPolicy), err
+}
+
+// UpdateStatus was generated because the type contains a Status member.
+// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
+func (c *FakeNetworkPolicies) UpdateStatus(ctx context.Context, networkPolicy *networkingv1.NetworkPolicy, opts v1.UpdateOptions) (*networkingv1.NetworkPolicy, error) {
+	obj, err := c.Fake.
+		Invokes(testing.NewUpdateSubresourceAction(networkpoliciesResource, "status", c.ns, networkPolicy), &networkingv1.NetworkPolicy{})
 
 	if obj == nil {
 		return nil, err

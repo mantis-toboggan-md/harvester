@@ -519,7 +519,15 @@ func (h *RestoreHandler) createNewVM(restore *harvesterv1.VirtualMachineRestore,
 	restoreID := getRestoreID(restore)
 	vmCpy := backup.Status.SourceSpec.DeepCopy()
 
-	newAnnotations, err := sanitizeVirtualMachineAnnotationsForRestore(restore, vmCpy.Spec.Template.ObjectMeta.Annotations)
+	newVMAnnotations := map[string]string{
+		lastRestoreAnnotation: restoreID,
+		restoreNameAnnotation: restore.Name,
+	}
+	if reservedMem, ok := vmCpy.ObjectMeta.Annotations[util.AnnotationReservedMemory]; ok {
+		newVMAnnotations[util.AnnotationReservedMemory] = reservedMem
+	}
+
+	newVMSpecAnnotations, err := sanitizeVirtualMachineAnnotationsForRestore(restore, vmCpy.Spec.Template.ObjectMeta.Annotations)
 	if err != nil {
 		return nil, err
 	}
@@ -531,18 +539,15 @@ func (h *RestoreHandler) createNewVM(restore *harvesterv1.VirtualMachineRestore,
 
 	vm := &kubevirtv1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      vmName,
-			Namespace: restore.Namespace,
-			Annotations: map[string]string{
-				lastRestoreAnnotation: restoreID,
-				restoreNameAnnotation: restore.Name,
-			},
+			Name:        vmName,
+			Namespace:   restore.Namespace,
+			Annotations: newVMAnnotations,
 		},
 		Spec: kubevirtv1.VirtualMachineSpec{
 			RunStrategy: &defaultRunStrategy,
 			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Annotations: newAnnotations,
+					Annotations: newVMSpecAnnotations,
 					Labels: map[string]string{
 						vmCreatorLabel: "harvester",
 						vmNameLabel:    vmName,
@@ -623,20 +628,11 @@ func (h *RestoreHandler) createRestoredPVC(
 	}
 	annotations[restoreNameAnnotation] = vmRestore.Name
 
-	sourcePVC := volumeBackup.PersistentVolumeClaim
-	spec := *sourcePVC.Spec.DeepCopy()
-	spec.VolumeName = ""
-	spec.DataSource = &corev1.TypedLocalObjectReference{
-		APIGroup: pointer.StringPtr(snapshotv1.SchemeGroupVersion.Group),
-		Kind:     volumeSnapshotKindName,
-		Name:     dataSourceName,
-	}
-
 	_, err := h.pvcClient.Create(&corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        volumeRestore.PersistentVolumeClaim.ObjectMeta.Name,
 			Namespace:   vmRestore.Namespace,
-			Labels:      sourcePVC.ObjectMeta.Labels,
+			Labels:      volumeBackup.PersistentVolumeClaim.ObjectMeta.Labels,
 			Annotations: annotations,
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -649,7 +645,17 @@ func (h *RestoreHandler) createRestoredPVC(
 				},
 			},
 		},
-		Spec: spec,
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: volumeBackup.PersistentVolumeClaim.Spec.AccessModes,
+			DataSource: &corev1.TypedLocalObjectReference{
+				APIGroup: pointer.StringPtr(snapshotv1.SchemeGroupVersion.Group),
+				Kind:     volumeSnapshotKindName,
+				Name:     dataSourceName,
+			},
+			Resources:        volumeBackup.PersistentVolumeClaim.Spec.Resources,
+			StorageClassName: volumeBackup.PersistentVolumeClaim.Spec.StorageClassName,
+			VolumeMode:       volumeBackup.PersistentVolumeClaim.Spec.VolumeMode,
+		},
 	})
 	return err
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
 	semverv3 "github.com/Masterminds/semver/v3"
 	provisioningv1 "github.com/rancher/rancher/pkg/apis/provisioning.cattle.io/v1"
@@ -17,17 +18,20 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 
 	harvesterv1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	ctlharvesterv1 "github.com/harvester/harvester/pkg/generated/controllers/harvesterhci.io/v1beta1"
 	kubevirtctrl "github.com/harvester/harvester/pkg/generated/controllers/kubevirt.io/v1"
 	upgradectlv1 "github.com/harvester/harvester/pkg/generated/controllers/upgrade.cattle.io/v1"
 	"github.com/harvester/harvester/pkg/settings"
+	"github.com/harvester/harvester/pkg/util"
 )
 
 var (
 	upgradeControllerLock sync.Mutex
-	rke2DrainNodes        bool = true
+	rke2DrainNodes        = true
 )
 
 const (
@@ -56,16 +60,19 @@ const (
 
 // upgradeHandler Creates Plan CRDs to trigger upgrades
 type upgradeHandler struct {
-	ctx           context.Context
-	namespace     string
-	nodeCache     ctlcorev1.NodeCache
-	jobClient     v1.JobClient
-	jobCache      v1.JobCache
-	upgradeClient ctlharvesterv1.UpgradeClient
-	upgradeCache  ctlharvesterv1.UpgradeCache
-	versionCache  ctlharvesterv1.VersionCache
-	planClient    upgradectlv1.PlanClient
-	planCache     upgradectlv1.PlanCache
+	ctx               context.Context
+	namespace         string
+	nodeCache         ctlcorev1.NodeCache
+	jobClient         v1.JobClient
+	jobCache          v1.JobCache
+	upgradeClient     ctlharvesterv1.UpgradeClient
+	upgradeCache      ctlharvesterv1.UpgradeCache
+	upgradeController ctlharvesterv1.UpgradeController
+	upgradeLogClient  ctlharvesterv1.UpgradeLogClient
+	upgradeLogCache   ctlharvesterv1.UpgradeLogCache
+	versionCache      ctlharvesterv1.VersionCache
+	planClient        upgradectlv1.PlanClient
+	planCache         upgradectlv1.PlanCache
 
 	vmImageClient ctlharvesterv1.VirtualMachineImageClient
 	vmImageCache  ctlharvesterv1.VirtualMachineImageCache
@@ -89,12 +96,36 @@ func (h *upgradeHandler) OnChanged(key string, upgrade *harvesterv1.Upgrade) (*h
 	repo := NewUpgradeRepo(h.ctx, upgrade, h)
 
 	if harvesterv1.UpgradeCompleted.GetStatus(upgrade) == "" {
+		logrus.Infof("Initialize upgrade %s/%s", upgrade.Namespace, upgrade.Name)
+
 		if err := h.resetLatestUpgradeLabel(upgrade.Name); err != nil {
 			return nil, err
 		}
-		logrus.Info("Creating upgrade repo image")
+
 		toUpdate := upgrade.DeepCopy()
 		initStatus(toUpdate)
+
+		if !upgrade.Spec.LogEnabled {
+			logrus.Info("Upgrade observability is administratively disabled")
+			setLogReadyCondition(toUpdate, corev1.ConditionFalse, "Disabled", "Upgrade observability is administratively disabled")
+			toUpdate.Labels[upgradeStateLabel] = StateLoggingInfraPrepared
+			return h.upgradeClient.Update(toUpdate)
+		}
+		logrus.Info("Enabling upgrade observability")
+		upgradeLog, err := h.upgradeLogClient.Create(prepareUpgradeLog(upgrade))
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			logrus.Warn("Failed to create the upgradeLog resource")
+			setLogReadyCondition(toUpdate, corev1.ConditionFalse, err.Error(), "")
+		} else {
+			toUpdate.Status.UpgradeLog = upgradeLog.Name
+		}
+		harvesterv1.LogReady.CreateUnknownIfNotExists(toUpdate)
+		return h.upgradeClient.Update(toUpdate)
+	}
+
+	if (harvesterv1.LogReady.IsTrue(upgrade) || harvesterv1.LogReady.IsFalse(upgrade)) && harvesterv1.ImageReady.GetStatus(upgrade) == "" {
+		logrus.Info("Creating upgrade repo image")
+		toUpdate := upgrade.DeepCopy()
 
 		if upgrade.Spec.Image == "" {
 			version, err := h.versionCache.Get(h.namespace, upgrade.Spec.Version)
@@ -132,6 +163,13 @@ func (h *upgradeHandler) OnChanged(key string, upgrade *harvesterv1.Upgrade) (*h
 		return h.upgradeClient.Update(toUpdate)
 	}
 
+	logrus.Infof("handle upgrade %s/%s with labels %v", upgrade.Namespace, upgrade.Name, upgrade.Labels)
+
+	// only run further operations for latest upgrade
+	if upgrade.Labels == nil || upgrade.Labels[harvesterLatestUpgradeLabel] != "true" {
+		return upgrade, nil
+	}
+
 	// clean upgrade repo VMs and images if a upgrade succeeds or fails.
 	if harvesterv1.UpgradeCompleted.IsTrue(upgrade) || harvesterv1.UpgradeCompleted.IsFalse(upgrade) {
 		return nil, h.cleanup(upgrade, harvesterv1.UpgradeCompleted.IsTrue(upgrade))
@@ -157,11 +195,25 @@ func (h *upgradeHandler) OnChanged(key string, upgrade *harvesterv1.Upgrade) (*h
 		}
 		toUpdate.Status.SingleNode = singleNode
 
-		repoInfo, err := repo.getInfo()
-		if err != nil {
+		backoff := wait.Backoff{
+			Steps:    30,
+			Duration: 10 * time.Second,
+			Factor:   1.0,
+			Jitter:   0.1,
+		}
+		var repoInfo *RepoInfo
+		if err := retry.OnError(backoff, util.IsRetriableNetworkError, func() error {
+			repoInfo, err = repo.getInfo()
+			if err != nil {
+				logrus.Warnf("Repo info retrieval failed with: %s", err)
+				return err
+			}
+			return nil
+		}); err != nil {
 			setUpgradeCompletedCondition(toUpdate, StateFailed, corev1.ConditionFalse, err.Error(), "")
 			return h.upgradeClient.Update(toUpdate)
 		}
+
 		repoInfoStr, err := repoInfo.Marshall()
 		if err != nil {
 			setUpgradeCompletedCondition(toUpdate, StateFailed, corev1.ConditionFalse, err.Error(), "")
@@ -169,26 +221,9 @@ func (h *upgradeHandler) OnChanged(key string, upgrade *harvesterv1.Upgrade) (*h
 		}
 
 		logrus.Info("Check minimum upgradable version")
-		minUpgradableVersion := repoInfo.Release.MinUpgradableVersion
-		if minUpgradableVersion == "" {
-			logrus.Debug("No minimum upgradable version specified, continue the upgrading")
-		} else {
-			constraint := fmt.Sprintf(">= %s", minUpgradableVersion)
-
-			c, err := semverv3.NewConstraint(constraint)
-			if err != nil {
-				return nil, err
-			}
-			v, err := semverv3.NewVersion(upgrade.Status.PreviousVersion)
-			if err != nil {
-				return nil, err
-			}
-
-			if a := c.Check(v); !a {
-				message := fmt.Sprintf("The current version %s is less than the minimum upgradable version %s.", upgrade.Status.PreviousVersion, minUpgradableVersion)
-				setUpgradeCompletedCondition(toUpdate, StateFailed, corev1.ConditionFalse, "Current version not supported.", message)
-				return h.upgradeClient.Update(toUpdate)
-			}
+		if err := isVersionUpgradable(toUpdate.Status.PreviousVersion, repoInfo.Release.MinUpgradableVersion); err != nil {
+			setUpgradeCompletedCondition(toUpdate, StateFailed, corev1.ConditionFalse, err.Error(), "")
+			return h.upgradeClient.Update(toUpdate)
 		}
 
 		logrus.Debug("Start preparing nodes for upgrade")
@@ -273,9 +308,15 @@ func (h *upgradeHandler) cleanup(upgrade *harvesterv1.Upgrade, cleanJobs bool) e
 		return err
 	}
 	clusterToUpdate := cluster.DeepCopy()
-	clusterToUpdate.Spec.RKEConfig = &provisioningv1.RKEConfig{}
+	provisionGeneration := clusterToUpdate.Spec.RKEConfig.ProvisionGeneration
+	clusterToUpdate.Spec.RKEConfig = &provisioningv1.RKEConfig{
+		RKEClusterSpecCommon: rkev1.RKEClusterSpecCommon{
+			ProvisionGeneration: provisionGeneration,
+		},
+	}
+	logrus.Infof("Reset RKEConfig and set provisionGeneration to %d", provisionGeneration)
 	if !reflect.DeepEqual(clusterToUpdate, cluster) {
-		logrus.Debug("Update cluster fleet-local/local")
+		logrus.Info("Update cluster fleet-local/local")
 		if _, err := h.clusterClient.Update(clusterToUpdate); err != nil {
 			return err
 		}
@@ -313,6 +354,28 @@ func (h *upgradeHandler) cleanup(upgrade *harvesterv1.Upgrade, cleanJobs bool) e
 			return err
 		}
 	}
+
+	// tear down logging infra if any
+	if harvesterv1.LogReady.IsTrue(upgrade) && upgrade.Status.UpgradeLog != "" {
+		upgradeLog, err := h.upgradeLogCache.Get(upgradeNamespace, upgrade.Status.UpgradeLog)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		upgradeLogToUpdate := upgradeLog.DeepCopy()
+		harvesterv1.UpgradeEnded.SetStatus(upgradeLogToUpdate, string(corev1.ConditionTrue))
+		harvesterv1.UpgradeEnded.Reason(upgradeLogToUpdate, "")
+		harvesterv1.UpgradeEnded.Message(upgradeLogToUpdate, "")
+		if !reflect.DeepEqual(upgradeLogToUpdate, upgradeLog) {
+			logrus.Infof("Update upgradeLog %s/%s", upgradeLog.Namespace, upgradeLog.Name)
+			if _, err := h.upgradeLogClient.Update(upgradeLogToUpdate); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -333,7 +396,7 @@ func initStatus(upgrade *harvesterv1.Upgrade) {
 	if upgrade.Labels == nil {
 		upgrade.Labels = make(map[string]string)
 	}
-	upgrade.Labels[upgradeStateLabel] = StateCreatingUpgradeImage
+	upgrade.Labels[upgradeStateLabel] = StatePreparingLoggingInfra
 	upgrade.Labels[harvesterLatestUpgradeLabel] = "true"
 	upgrade.Status.PreviousVersion = settings.ServerVersion.Get()
 }
@@ -372,7 +435,7 @@ func (h *upgradeHandler) upgradeKubernetes(kubernetesVersion string) error {
 		toUpdate.Spec.RKEConfig = &provisioningv1.RKEConfig{}
 	}
 
-	toUpdate.Spec.RKEConfig.ProvisionGeneration += 1
+	toUpdate.Spec.RKEConfig.ProvisionGeneration++
 	toUpdate.Spec.RKEConfig.UpgradeStrategy.ControlPlaneConcurrency = "1"
 	toUpdate.Spec.RKEConfig.UpgradeStrategy.WorkerConcurrency = "1"
 	toUpdate.Spec.RKEConfig.UpgradeStrategy.ControlPlaneDrainOptions.DeleteEmptyDirData = rke2DrainNodes
@@ -422,10 +485,41 @@ func ensureSingleUpgrade(namespace string, upgradeCache ctlharvesterv1.UpgradeCa
 	return onGoingUpgrades[0], nil
 }
 
-func getCachedRepoInfo(upgrade *harvesterv1.Upgrade) (*UpgradeRepoInfo, error) {
-	repoInfo := &UpgradeRepoInfo{}
+func getCachedRepoInfo(upgrade *harvesterv1.Upgrade) (*RepoInfo, error) {
+	repoInfo := &RepoInfo{}
 	if err := repoInfo.Load(upgrade.Status.RepoInfo); err != nil {
 		return nil, err
 	}
 	return repoInfo, nil
+}
+
+func isVersionUpgradable(currentVersion, minUpgradableVersion string) error {
+	if minUpgradableVersion == "" {
+		logrus.Debug("No minimum upgradable version specified, continue the upgrading")
+		return nil
+	}
+
+	// short-circuit the equal cases as the library doesn't support the hack applied below
+	if currentVersion == minUpgradableVersion {
+		logrus.Debug("Upgrade from the exact same version as the minimum requirement")
+		return nil
+	}
+	// to enable comparisons against prerelease versions
+	constraint := fmt.Sprintf(">= %s-z", minUpgradableVersion)
+
+	c, err := semverv3.NewConstraint(constraint)
+	if err != nil {
+		return err
+	}
+	v, err := semverv3.NewVersion(currentVersion)
+	if err != nil {
+		return err
+	}
+
+	if a := c.Check(v); !a {
+		message := fmt.Sprintf("The current version %s is less than the minimum upgradable version %s.", currentVersion, minUpgradableVersion)
+		return fmt.Errorf("%s", message)
+	}
+
+	return nil
 }
